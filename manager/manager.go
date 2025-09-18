@@ -112,6 +112,10 @@ type Manager interface {
 
 	AddMiddleware(fntype string, fn MiddlewareFunc)
 
+	// InlineDispatch is used for testing. It simulates the real Faktory behavior
+	// by encoding and decoding job arguments through JSON to match production behavior.
+	InlineDispatch(ctx context.Context, job *client.Job) (*client.Job, error)
+
 	KV() storage.KV
 	Redis() *redis.Client
 	SetFetcher(f Fetcher)
@@ -255,4 +259,62 @@ func (m *manager) enqueue(ctx context.Context, job *client.Job) error {
 		return fmt.Errorf("cannot marshal job payload: %w", err)
 	}
 	return q.Push(ctx, data)
+}
+
+// serializeArgs simulates the real Faktory behavior where job arguments
+// are JSON-encoded and then JSON-decoded, which can change argument types.
+// This is used for testing to make InlineDispatch behave like real Faktory.
+func serializeArgs(args []any) ([]any, error) {
+	if args == nil {
+		return nil, nil
+	}
+
+	// First, marshal the arguments to JSON
+	jsonBytes, err := json.Marshal(args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal args: %w", err)
+	}
+
+	// Then unmarshal back to []any to simulate the round-trip
+	var serializedArgs []any
+	err = json.Unmarshal(jsonBytes, &serializedArgs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal args: %w", err)
+	}
+
+	return serializedArgs, nil
+}
+
+// InlineDispatch is used for testing. It simulates the real Faktory behavior
+// by encoding and decoding job arguments through JSON, which changes their types
+// to match what would happen in a real Faktory deployment.
+func (m *manager) InlineDispatch(ctx context.Context, job *client.Job) (*client.Job, error) {
+	if job == nil {
+		return nil, fmt.Errorf("job cannot be nil")
+	}
+
+	// Create a copy of the job to avoid modifying the original
+	jobCopy := &client.Job{
+		Retry:      job.Retry,
+		Failure:    job.Failure,
+		Custom:     job.Custom,
+		Jid:        job.Jid,
+		Queue:      job.Queue,
+		Type:       job.Type,
+		CreatedAt:  job.CreatedAt,
+		EnqueuedAt: job.EnqueuedAt,
+		At:         job.At,
+		Args:       job.Args,
+		ReserveFor: job.ReserveFor,
+		Backtrace:  job.Backtrace,
+	}
+
+	// Simulate the JSON serialization round-trip that happens in real Faktory
+	serializedArgs, err := serializeArgs(job.Args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize args: %w", err)
+	}
+
+	jobCopy.Args = serializedArgs
+	return jobCopy, nil
 }

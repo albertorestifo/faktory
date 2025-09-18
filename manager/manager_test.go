@@ -352,3 +352,100 @@ func withRedis(t *testing.T, name string, fn func(*testing.T, storage.Store)) {
 	fn(t, store)
 
 }
+
+func TestInlineDispatch(t *testing.T) {
+	withRedis(t, "inline-dispatch", func(t *testing.T, store storage.Store) {
+		bg := context.Background()
+		store.Flush(bg)
+		m := NewManager(store)
+
+		t.Run("InlineDispatchWithVariousArgTypes", func(t *testing.T) {
+			// Test that InlineDispatch properly serializes arguments
+			job := client.NewJob("TestJob", 42, "hello", true, 3.14, map[string]any{"key": "value"})
+			
+			// Capture original arg types
+			originalArgTypes := make([]string, len(job.Args))
+			for i, arg := range job.Args {
+				originalArgTypes[i] = fmt.Sprintf("%T", arg)
+			}
+
+			processedJob, err := m.InlineDispatch(bg, job)
+			assert.NoError(t, err)
+			assert.NotNil(t, processedJob)
+			
+			// Verify the job was copied, not modified in-place
+			assert.NotSame(t, job, processedJob)
+			assert.Equal(t, job.Jid, processedJob.Jid)
+			assert.Equal(t, job.Type, processedJob.Type)
+			assert.Equal(t, job.Queue, processedJob.Queue)
+			
+			// Verify arguments were serialized/deserialized
+			assert.Equal(t, len(job.Args), len(processedJob.Args))
+			
+			// Verify the type changes that occur during JSON round-trip
+			expectedTypes := []string{"float64", "string", "bool", "float64", "map[string]interface {}"}
+			for i, arg := range processedJob.Args {
+				actualType := fmt.Sprintf("%T", arg)
+				assert.Equal(t, expectedTypes[i], actualType, 
+					"Arg %d: expected type %s, got %s (original was %s)", 
+					i, expectedTypes[i], actualType, originalArgTypes[i])
+			}
+			
+			// Verify values are preserved despite type changes
+			assert.Equal(t, float64(42), processedJob.Args[0])
+			assert.Equal(t, "hello", processedJob.Args[1])
+			assert.Equal(t, true, processedJob.Args[2])
+			assert.Equal(t, 3.14, processedJob.Args[3])
+			assert.Equal(t, map[string]any{"key": "value"}, processedJob.Args[4])
+		})
+
+		t.Run("InlineDispatchWithNilJob", func(t *testing.T) {
+			_, err := m.InlineDispatch(bg, nil)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "job cannot be nil")
+		})
+
+		t.Run("InlineDispatchWithNilArgs", func(t *testing.T) {
+			job := client.NewJob("TestJob")
+			job.Args = nil
+			
+			processedJob, err := m.InlineDispatch(bg, job)
+			assert.NoError(t, err)
+			assert.NotNil(t, processedJob)
+			assert.Nil(t, processedJob.Args)
+		})
+
+		t.Run("InlineDispatchWithEmptyArgs", func(t *testing.T) {
+			job := client.NewJob("TestJob")
+			
+			processedJob, err := m.InlineDispatch(bg, job)
+			assert.NoError(t, err)
+			assert.NotNil(t, processedJob)
+			assert.Empty(t, processedJob.Args)
+		})
+
+		t.Run("InlineDispatchSimulatesRealFaktoryBehavior", func(t *testing.T) {
+			// This test demonstrates the key difference between direct job processing
+			// and InlineDispatch which simulates real Faktory's JSON round-trip
+			job := client.NewJob("TestJob", 42, 123, 999)
+
+			// Before InlineDispatch: args are still their original types
+			for _, arg := range job.Args {
+				assert.IsType(t, int(0), arg, "Original args should be integers")
+			}
+
+			// After InlineDispatch: args have been through JSON round-trip
+			processedJob, err := m.InlineDispatch(bg, job)
+			assert.NoError(t, err)
+			
+			for _, arg := range processedJob.Args {
+				assert.IsType(t, float64(0), arg, "Processed args should be float64 due to JSON round-trip")
+			}
+
+			// Values are preserved, just types changed
+			assert.Equal(t, float64(42), processedJob.Args[0])
+			assert.Equal(t, float64(123), processedJob.Args[1])
+			assert.Equal(t, float64(999), processedJob.Args[2])
+		})
+	})
+}
